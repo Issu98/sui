@@ -2,6 +2,7 @@
 // SPDX-License-Identifier: Apache-2.0
 
 use anyhow::anyhow;
+// use itertools::Itertools;
 use std::collections::HashMap;
 use std::sync::Arc;
 
@@ -18,7 +19,7 @@ use sui_open_rpc::Module;
 use sui_types::balance::Supply;
 use sui_types::base_types::{ObjectID, ObjectRef, SuiAddress};
 use sui_types::coin::{Coin, CoinMetadata, TreasuryCap};
-use sui_types::error::{SuiError, UserInputError};
+use sui_types::error::{SuiError, SuiResult, UserInputError};
 use sui_types::gas_coin::GAS;
 use sui_types::messages::TransactionEffectsAPI;
 use sui_types::object::{Object, Owner};
@@ -37,6 +38,41 @@ impl CoinReadApi {
     pub fn new(state: Arc<AuthorityState>) -> Self {
         Self { state }
     }
+
+    // // fn get_coins(&self, type_tag: String()) -> Result<Vec<SuiCoin>
+    // fn get_coins(
+    //     &self,
+    //     owner: SuiAddress,
+    //     coin_type: Option<String>,
+    //     // exclusive cursor if `Some`, otherwise start from the beginning
+    //     cursor: Option<ObjectID>,
+    //     limit: Option<usize>,
+    // ) -> Result<CoinPage, Error> {
+    //     // TODO: Add index to improve performance?
+    //     let limit = cap_page_limit(limit);
+    //     let mut coins = self
+    //         .get_owner_coin_iterator(owner, coin_type)?
+    //         .skip_while(|o| matches!(&cursor, Some(cursor) if cursor != &o.0))
+    //         // skip an extra b/c the cursor is exclusive
+    //         .skip(usize::from(cursor.is_some()))
+    //         .take(limit + 1)
+    //         .collect::<Vec<_>>();
+
+    //     let has_next_page = coins.len() > limit;
+    //     coins.truncate(limit);
+    //     let next_cursor = coins.last().cloned().map_or(cursor, |(id, _, _)| Some(id));
+
+    //     let data = self
+    //         .multi_get_coin(&coins.into_iter().map(ObjectKey::from).collect::<Vec<_>>())?
+    //         .into_iter()
+    //         .collect::<Result<Vec<_>, _>>()?;
+
+    //     Ok(CoinPage {
+    //         data,
+    //         next_cursor,
+    //         has_next_page,
+    //     })
+    // }
 
     fn multi_get_coin(&self, coins: &[ObjectKey]) -> Result<Vec<Result<SuiCoin, Error>>, Error> {
         let o = self.state.database.multi_get_object_by_key(coins)?;
@@ -117,6 +153,33 @@ impl CoinReadApi {
             data,
             next_cursor,
             has_next_page,
+        })
+    }
+
+    fn get_coin_iterator(
+        &self,
+        owner: SuiAddress,
+        coin_type: String,
+        // ) -> Result<impl Iterator<Item = (String, ObjectID, CoinInfo)> + '_, Error> {
+    ) -> SuiResult<Balance> {
+        let coins = self
+            .state
+            .get_owned_coins_iterator(owner, Some(coin_type.clone()))?
+            .map(|(_coin_type, obj_id, coin)| (coin_type.to_string(), obj_id, coin));
+        // .group_by(|(coin_type, obj_id, coin)| coin_type.clone());
+
+        let mut total_balance = 0u128;
+        let mut coin_object_count = 0;
+        for (_coin_type, _obj_id, coin_info) in coins {
+            total_balance += coin_info.balance as u128;
+            coin_object_count += 1;
+        }
+
+        Ok(Balance {
+            coin_type,
+            coin_object_count,
+            total_balance,
+            locked_balance: HashMap::new(),
         })
     }
 
@@ -215,35 +278,70 @@ impl CoinReadApiServer for CoinReadApi {
     }
 
     fn get_balance(&self, owner: SuiAddress, coin_type: Option<String>) -> RpcResult<Balance> {
+        //
         let coin_type = TypeTag::Struct(Box::new(match coin_type {
             Some(c) => parse_sui_struct_tag(&c)?,
             None => GAS::type_(),
         }));
 
+        self.get_coin_iterator(owner, coin_type.to_string())
+            .map_err(|e| anyhow!(e).into())
+
         // TODO: Add index to improve performance?
-        let coins = self.get_owner_coin_iterator(owner, Some(&coin_type))?;
-        let mut total_balance = 0u128;
-        let mut locked_balance = HashMap::new();
-        let mut coin_object_count = 0;
-        let coins = coins.map(ObjectKey::from).collect::<Vec<_>>();
+        // let coins = self.get_owner_coin_iterator(owner, Some(&coin_type))?;
+        // let mut total_balance = 0u128;
+        // let mut locked_balance = HashMap::new();
+        // let mut coin_object_count = 0;
+        // let coins = coins.map(ObjectKey::from).collect::<Vec<_>>();
 
-        for coin in self.multi_get_coin(&coins)? {
-            let coin = coin?;
-            if let Some(lock) = coin.locked_until_epoch {
-                *locked_balance.entry(lock).or_default() += coin.balance as u128
-            } else {
-                total_balance += coin.balance as u128;
-            }
-            coin_object_count += 1;
-        }
+        // for coin in self.multi_get_coin(&coins)? {
+        //     let coin = coin?;
+        //     if let Some(lock) = coin.locked_until_epoch {
+        //         *locked_balance.entry(lock).or_default() += coin.balance as u128
+        //     } else {
+        //         total_balance += coin.balance as u128;
+        //     }
+        //     coin_object_count += 1;
+        // }
 
-        Ok(Balance {
-            coin_type: coin_type.to_string(),
-            coin_object_count,
-            total_balance,
-            locked_balance,
-        })
+        // Ok(Balance {
+        //     coin_type: coin_type.to_string(),
+        //     coin_object_count,
+        //     total_balance,
+        //     locked_balance,
+        // })
     }
+
+    // fn get_balance(&self, owner: SuiAddress, coin_type: Option<String>) -> RpcResult<Balance> {
+    //     let coin_type = TypeTag::Struct(Box::new(match coin_type {
+    //         Some(c) => parse_sui_struct_tag(&c)?,
+    //         None => GAS::type_(),
+    //     }));
+
+    //     // TODO: Add index to improve performance?
+    //     let coins = self.get_owner_coin_iterator(owner, Some(&coin_type))?;
+    //     let mut total_balance = 0u128;
+    //     let mut locked_balance = HashMap::new();
+    //     let mut coin_object_count = 0;
+    //     let coins = coins.map(ObjectKey::from).collect::<Vec<_>>();
+
+    //     for coin in self.multi_get_coin(&coins)? {
+    //         let coin = coin?;
+    //         if let Some(lock) = coin.locked_until_epoch {
+    //             *locked_balance.entry(lock).or_default() += coin.balance as u128
+    //         } else {
+    //             total_balance += coin.balance as u128;
+    //         }
+    //         coin_object_count += 1;
+    //     }
+
+    //     Ok(Balance {
+    //         coin_type: coin_type.to_string(),
+    //         coin_object_count,
+    //         total_balance,
+    //         locked_balance,
+    //     })
+    // }
 
     fn get_all_balances(&self, owner: SuiAddress) -> RpcResult<Vec<Balance>> {
         let coins = self
